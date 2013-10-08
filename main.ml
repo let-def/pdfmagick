@@ -1,5 +1,3 @@
-open CamlPDF
-
 module Split = struct
   let numget x =
     let x' = int_of_float x in
@@ -45,15 +43,15 @@ module Split = struct
   let h, v, hr, vr =
     let wrap f =
       let page_split page =
-        let boxes = try_split f page.Pdfdoc.mediabox in
-        List.map (fun box -> { page with Pdfdoc.mediabox = box }) boxes
+        let boxes = try_split f page.Pdfpage.mediabox in
+        List.map (fun box -> { page with Pdfpage.mediabox = box }) boxes
       in
       fun pages -> List.flatten (List.map page_split pages)
     in
     wrap split_h, wrap split_v, wrap split_hr, wrap split_vr
 end
 
-type page = CamlPDF.Pdfdoc.page
+type page = Pdfpage.t
 
 type command =
   | Read_pdf of string
@@ -180,7 +178,7 @@ module StringMap = Map.Make (String)
 
 type state = {
   variables : page list StringMap.t;
-  files : Pdf.pdfdoc StringMap.t;
+  files : Pdf.t StringMap.t;
   pages : page list
 }
 
@@ -192,7 +190,7 @@ let empty_state = {
 
 let rec execute state = function
   | Read_pdf name -> { state with pages = state.pages @ 
-                       Pdfdoc.pages_of_pagetree
+                       Pdfpage.pages_of_pagetree
                          (StringMap.find name state.files) }
   | Variable name -> { state with pages = state.pages @ 
                          (StringMap.find name state.variables) }
@@ -207,7 +205,7 @@ let main () =
   try
     let output, commands = Args.parse () in
     let names = list_files commands in
-    let pdfs = List.map (Pdfread.pdf_of_file None) names in
+    let pdfs = List.map (Pdfread.pdf_of_file None None) names in
     let pdfs = Pdf.renumber_pdfs pdfs in
     let files = List.fold_left2
       (fun files name file -> StringMap.add name file files)
@@ -217,8 +215,8 @@ let main () =
     let doc = List.fold_left execute { empty_state with files } commands in
     let pdf = ref (Pdf.empty ()) in
     List.iter (Pdf.objiter (fun k v -> ignore (Pdf.addobj_given_num !pdf (k, v)))) pdfs;
-    let pdf, pagetree_num = Pdfdoc.add_pagetree doc.pages !pdf in
-    let pdf = Pdfdoc.add_root pagetree_num [] pdf in
+    let pdf, pagetree_num = Pdfpage.add_pagetree doc.pages !pdf in
+    let pdf = Pdfpage.add_root pagetree_num [] pdf in
     let pdf = {pdf with Pdf. major = 1; minor } in
     Pdf.remove_unreferenced pdf;
     Pdfwrite.pdf_to_file pdf output
