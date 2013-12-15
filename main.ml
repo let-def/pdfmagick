@@ -108,6 +108,34 @@ module Args = struct
     then list_take (succ hi - lo) pages
     else pages
 
+  let set_mediabox s pages =
+    Scanf.sscanf s "%f,%f,%f,%f" (fun x y x' y' ->
+        List.map (fun page ->
+            { page with Pdfpage.mediabox =
+              match page.Pdfpage.mediabox with
+              | Pdf.Array [x0; y0; x'0; y'0] ->
+                let x0, y0, x'0, y'0 =
+                  Pdf.getnum x0, Pdf.getnum y0, Pdf.getnum x'0, Pdf.getnum y'0
+                in
+                Pdf.(Array [Real (x0 +. x); Real (y0 +. y); 
+                            Real (x'0 +. x'); Real (y'0 +. y')])
+              | box -> box
+            })
+          pages
+      )
+
+  let print_mediabox pages =
+    List.iter (fun {Pdfpage.mediabox} ->
+      match mediabox with
+      | Pdf.Array [x; y; x'; y'] ->
+        let x, y, x', y' =
+          Pdf.getnum x, Pdf.getnum y, Pdf.getnum x', Pdf.getnum y'
+        in
+        Printf.printf "%f,%f,%f,%f\n" x y x' y'
+      | _ -> ())
+      pages;
+    pages
+
   let rec odd_pages = function
     | x :: _ :: pages -> x :: odd_pages pages
     | pages -> pages
@@ -140,7 +168,11 @@ module Args = struct
     "--odd", transform odd_pages, " Keep every odd page";
   
     "-@", instr (fun s -> Set_variable s), " ";
-    "--set", instr (fun s -> Set_variable s), " Save current page stream for later reuse"
+    "--set", instr (fun s -> Set_variable s), " Save current page stream for later reuse";
+
+    "--mediabox", transform print_mediabox, " Print mediabox for each page";
+
+    "--adjust-mediabox", transform' set_mediabox, "X,Y,X',Y' Shift mediabox dimension of each page by specified amount";
   ]
   let variable s = push_instr (Variable s)
 
@@ -151,7 +183,7 @@ module Args = struct
   let parse () =
     Arg.parse args variable usage;
     if !stack <> [] then failwith "Unclosed parenthesis";
-    if !output = "" then failwith "You must specify an output file (using -o <out>.pdf).";
+    if !output = "" then prerr_endline "WARNING: No output file specified (use -o <out>.pdf).";
     let result = get_commands () in
     stack := []; commands := [];
     !output, result
@@ -212,14 +244,17 @@ let main () =
       StringMap.empty names pdfs
     in
     let minor = List.fold_left max 0 (List.map (fun p -> p.Pdf.minor) pdfs) in
-    let doc = List.fold_left execute { empty_state with files } commands in
-    let pdf = ref (Pdf.empty ()) in
-    List.iter (Pdf.objiter (fun k v -> ignore (Pdf.addobj_given_num !pdf (k, v)))) pdfs;
-    let pdf, pagetree_num = Pdfpage.add_pagetree doc.pages !pdf in
-    let pdf = Pdfpage.add_root pagetree_num [] pdf in
-    let pdf = {pdf with Pdf. major = 1; minor } in
-    Pdf.remove_unreferenced pdf;
-    Pdfwrite.pdf_to_file pdf output
+    let doc = List.fold_left (execute pdfs)  { empty_state with files } commands in
+    if output <> "" then
+      begin
+        let pdf = ref (Pdf.empty ()) in
+        List.iter (Pdf.objiter (fun k v -> ignore (Pdf.addobj_given_num !pdf (k, v)))) pdfs;
+        let pdf, pagetree_num = Pdfpage.add_pagetree doc.pages !pdf in
+        let pdf = Pdfpage.add_root pagetree_num [] pdf in
+        let pdf = {pdf with Pdf. major = 1; minor } in
+        Pdf.remove_unreferenced pdf;
+        Pdfwrite.pdf_to_file pdf output
+      end
   with Failure s ->
     Args.help ();
     prerr_endline s
