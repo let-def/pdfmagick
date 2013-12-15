@@ -51,12 +51,77 @@ module Split = struct
     wrap split_h, wrap split_v, wrap split_hr, wrap split_vr
 end
 
+module Pdf_json = struct
+  open Pdf
+  type env = {
+    mutable counter: int; 
+    streams: (int, (pdfobject * stream) Pervasives.ref) Hashtbl.t;
+  }
+
+  let fresh_env () = {counter = 0; streams = Hashtbl.create 7}
+  let register_stream env stream =
+    env.counter <- env.counter + 1;
+    Hashtbl.add env.streams env.counter stream;
+    env.counter
+
+  let get_stream env i =
+    try Hashtbl.find env.streams i
+    with Not_found ->
+      failwith ("Unknown stream " ^ string_of_int i)
+
+  let object_to_json lookup env = 
+    let rec aux = function
+      | Null      -> `Null
+      | Boolean b -> `Bool b
+      | Integer i -> `Int i
+      | Real f    -> `Float f
+      | String s  -> `String s
+      | Name s    -> `Variant ("name", Some (`String s))
+      | Array l   -> `List (List.map aux l)
+      | Dictionary l -> `Assoc (List.map (fun (n,o) -> n, aux o) l)
+      | Stream s   -> `Variant ("stream", Some (`Int (register_stream env s)))
+      | Indirect i -> 
+        let fields = match lookup i with
+          | None -> `Int i
+          | Some c -> `Assoc ["address", `Int i; "content", aux c]
+        in
+        `Variant ("indirect", Some fields)
+    in
+    aux
+
+  let object_of_json save env = 
+    let rec aux = function
+      | `Null     -> Null
+      | `Bool b   -> Boolean b
+      | `Int i    -> Integer i
+      | `Intlit i -> Integer (int_of_string i)
+      | `Float f  -> Real f
+      | `String s -> String s
+      | `Variant ("name", Some (`String s)) -> Name s
+      | `List l -> Array (List.map aux l)
+      | `Assoc l -> Dictionary (List.map (fun (n,o) -> n, aux o) l)
+      | `Variant ("stream", Some (`Int i)) ->
+        Stream (get_stream env i)
+      | `Variant ("indirect", Some (`Int i)) -> Indirect i
+      | `Variant ("indirect", 
+                  Some (`Assoc (["address", `Int i; "content", c] |
+                                ["content", c; "address", `Int i]))) ->
+        Indirect (save (Some i) (aux c))
+      | `Variant ("indirect", Some (`Assoc ["content", c])) ->
+        Indirect (save None (aux c))
+      | j -> 
+        Yojson.Safe.pretty_to_channel stderr j;
+        failwith "Ill-formed pdf-json"
+    in
+    aux
+end
+
 type page = Pdfpage.t
 
 type command =
   | Read_pdf of string
   | Variable of string
-  | Transform of (page list -> page list)
+  | Transform of (Pdf.t list -> page list -> page list)
   | Set_variable of string
   | Sub of command list
 
@@ -87,8 +152,14 @@ module Args = struct
   let push_instr cmd = commands := cmd :: !commands
 
   let instr cmd = Arg.String (fun s -> push_instr (cmd s))
-  let transform f = Arg.Unit (fun () -> push_instr (Transform f))
-  let transform' f = Arg.String (fun s-> push_instr (Transform (f s)))
+  let transform f =
+    Arg.Unit (fun () -> push_instr (Transform (fun _ -> f)))
+  let transform' f = 
+    Arg.String (fun s -> let f = f s in push_instr (Transform (fun _ -> f)))
+  let transformP f = 
+    Arg.Unit (fun () -> push_instr (Transform f))
+  let transformP' f = 
+    Arg.String (fun s -> let f = f s in push_instr (Transform f))
   
   let filter_pages range pages =
     let sep, len = String.index range '-', String.length range in
@@ -136,6 +207,86 @@ module Args = struct
       pages;
     pages
 
+  let print_json pdfs pages =
+    let env = Pdf_json.fresh_env () in
+    let rec lookup i = function
+      | pdf :: pdfs -> 
+        begin try Some (Pdf.lookup_obj pdf i)
+          with Not_found ->
+            lookup i pdfs
+        end 
+      | [] -> None
+    in
+    let lookup i = lookup i pdfs in
+    List.iter (fun {Pdfpage.content} ->
+        Yojson.pretty_to_channel stdout
+        (`List (List.map (Pdf_json.object_to_json lookup env) content))
+      )
+      pages;
+    pages
+
+  let edit_json command pdfs pages =
+    let env = Pdf_json.fresh_env () in
+    let rec lookup i = function
+      | pdf :: pdfs -> 
+        begin try Some (Pdf.lookup_obj pdf i)
+          with Not_found ->
+            lookup i pdfs
+        end 
+      | [] -> None
+    in
+    let lookup i = lookup i pdfs in
+    let pi, po = Unix.open_process command in
+    List.iter (fun {Pdfpage.content} ->
+        Yojson.pretty_to_channel po
+        (`List (List.map (Pdf_json.object_to_json lookup env) content))
+      )
+      pages;
+    close_out_noerr po;
+    let biggest = 
+      List.fold_left 
+        (fun x pdf -> List.fold_left max x (Pdf.objnumbers pdf))
+        0 pdfs
+    in
+    let addr = ref biggest in
+    let rec save i obj = function
+      | pdf :: pdfs ->
+        begin try ignore (Pdf.lookup_obj pdf i);
+            Pdf.addobj_given_num pdf (i,obj)
+          with Not_found ->
+            save i obj pdfs
+        end
+      | [] -> raise Not_found
+    in
+    let pdf = match pdfs with pdf :: _ -> pdf | [] -> assert false in
+    let save i obj =
+      match i with 
+      | None -> 
+        incr addr;
+        Pdf.addobj_given_num pdf (!addr,obj);
+        !addr
+      | Some i ->
+        begin try 
+            save i obj pdfs
+          with Not_found ->
+            Pdf.addobj_given_num pdf (i,obj)
+        end;
+        i
+    in
+    let stream = Yojson.Safe.stream_from_channel pi in
+    let rec aux acc = 
+      match (try Some (Stream.next stream) with Stream.Failure -> None) with
+      | Some (`List obj) ->
+        aux (List.map (Pdf_json.object_of_json save env) obj :: acc)
+      | Some _ -> failwith "Ill-formed pdf page"
+      | None -> List.rev acc
+    in 
+    let contents = aux [] in
+    close_in_noerr pi;
+    List.map2 (fun page content -> {page with Pdfpage.content}) pages contents
+
+    
+
   let rec odd_pages = function
     | x :: _ :: pages -> x :: odd_pages pages
     | pages -> pages
@@ -173,6 +324,9 @@ module Args = struct
     "--mediabox", transform print_mediabox, " Print mediabox for each page";
 
     "--adjust-mediabox", transform' set_mediabox, "X,Y,X',Y' Shift mediabox dimension of each page by specified amount";
+
+    "--json", transformP print_json, " Print pdf as json";
+    "--edit-json", transformP' edit_json, " Stream pdf as json to specified command and read back output";
   ]
   let variable s = push_instr (Variable s)
 
@@ -220,18 +374,21 @@ let empty_state = {
   pages = [];
 }
 
-let rec execute state = function
-  | Read_pdf name -> { state with pages = state.pages @ 
-                       Pdfpage.pages_of_pagetree
-                         (StringMap.find name state.files) }
-  | Variable name -> { state with pages = state.pages @ 
-                         (StringMap.find name state.variables) }
-  | Transform f -> { state with pages = f state.pages }
-  | Set_variable name ->
+let execute t = 
+  let rec aux state = function
+    | Read_pdf name -> { state with pages = state.pages @ 
+                                              Pdfpage.pages_of_pagetree
+                                                (StringMap.find name state.files) }
+    | Variable name -> { state with pages = state.pages @ 
+                                              (StringMap.find name state.variables) }
+    | Transform f -> { state with pages = f t state.pages }
+    | Set_variable name ->
       { state with variables = StringMap.add name state.pages state.variables }
-  | Sub cmds ->
-      let state' = List.fold_left execute { state with pages = [] } cmds in
+    | Sub cmds ->
+      let state' = List.fold_left aux { state with pages = [] } cmds in
       { state' with pages = state.pages @ state'.pages }
+  in
+  aux
 
 let main () =
   try
@@ -246,7 +403,7 @@ let main () =
     let minor = List.fold_left max 0 (List.map (fun p -> p.Pdf.minor) pdfs) in
     let doc = List.fold_left (execute pdfs)  { empty_state with files } commands in
     if output <> "" then
-      begin
+      begin 
         let pdf = ref (Pdf.empty ()) in
         List.iter (Pdf.objiter (fun k v -> ignore (Pdf.addobj_given_num !pdf (k, v)))) pdfs;
         let pdf, pagetree_num = Pdfpage.add_pagetree doc.pages !pdf in
