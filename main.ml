@@ -55,7 +55,7 @@ module Pdf_json = struct
   open Pdf
   type env = {
     mutable counter: int; 
-    streams: (int, (pdfobject * stream) Pervasives.ref) Hashtbl.t;
+    streams: (int, (pdfobject * stream) Stdlib.ref) Hashtbl.t;
   }
 
   let fresh_env () = {counter = 0; streams = Hashtbl.create 7}
@@ -167,7 +167,7 @@ module Args = struct
     let as_int s = try int_of_string s with Invalid_argument _ -> -1 in
     let lo, hi = as_int lo, as_int hi in
     let rec list_drop n = function
-      | x :: xs when n > 0 -> list_drop (pred n) xs
+      | _ :: xs when n > 0 -> list_drop (pred n) xs
       | xs -> xs
     in
     let rec list_take n = function
@@ -196,7 +196,7 @@ module Args = struct
       )
 
   let print_mediabox pages =
-    List.iter (fun {Pdfpage.mediabox} ->
+    List.iter (fun {Pdfpage.mediabox; _} ->
       match mediabox with
       | Pdf.Array [x; y; x'; y'] ->
         let x, y, x', y' =
@@ -218,7 +218,7 @@ module Args = struct
       | [] -> None
     in
     let lookup i = lookup i pdfs in
-    List.iter (fun {Pdfpage.content} ->
+    List.iter (fun {Pdfpage.content; _} ->
         Yojson.pretty_to_channel stdout
         (`List (List.map (Pdf_json.object_to_json lookup env) content))
       )
@@ -237,7 +237,7 @@ module Args = struct
     in
     let lookup i = lookup i pdfs in
     let pi, po = Unix.open_process command in
-    List.iter (fun {Pdfpage.content} ->
+    List.iter (fun {Pdfpage.content; _} ->
         Yojson.pretty_to_channel po
         (`List (List.map (Pdf_json.object_to_json lookup env) content))
       )
@@ -346,7 +346,7 @@ module Args = struct
 end
 
 let plausible_name n =
-  (Filename.check_suffix (String.lowercase n) ".pdf") && Sys.file_exists n
+  (Filename.check_suffix (String.lowercase_ascii n) ".pdf") && Sys.file_exists n
 
 let list_files commands =
   let rec extract_names acc commands =

@@ -1,5 +1,5 @@
 all:
-	ocamlbuild -use-ocamlfind -tag "package(camlpdf,yojson)" main.native
+	dune build
 
 clean:
-	ocamlbuild -clean
+	dune clean
