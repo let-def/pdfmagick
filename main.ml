@@ -273,13 +273,14 @@ module Args = struct
         end;
         i
     in
-    let stream = Yojson.Safe.stream_from_channel pi in
+    let seq = ref (Yojson.Safe.seq_from_channel pi) in
     let rec aux acc = 
-      match (try Some (Stream.next stream) with Stream.Failure -> None) with
-      | Some (`List obj) ->
+      match !seq () with
+      | Cons (`List obj, seq') ->
+        seq := seq';
         aux (List.map (Pdf_json.object_of_json save env) obj :: acc)
-      | Some _ -> failwith "Ill-formed pdf page"
-      | None -> List.rev acc
+      | Cons _ -> failwith "Ill-formed pdf page"
+      | Nil -> List.rev acc
     in 
     let contents = aux [] in
     close_in_noerr pi;
